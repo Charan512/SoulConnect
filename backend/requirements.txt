@@ -1,0 +1,13 @@
+streamlit
+pandas
+scikit-learn
+torch
+transformers
+nltk
+fastapi
+uvicorn
+joblib
+accelerate
+PyJWT
+passlib[bcrypt]
+bcrypt
