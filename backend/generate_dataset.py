@@ -110,6 +110,26 @@ _suicide_templates = [
     "I'm planning something permanent and for the first time I feel peace.",
     "I tried reaching out but they said I was being dramatic. Maybe I am.",
     "I feel disconnected from reality. Living feels like watching myself from outside.",
+    "I'm feeling so numb lately, I don't even care if I wake up.",
+    "I've written a note and left it on my desk. I'm ready.",
+    "People say it gets better, but I've been waiting for years. I'm done.",
+    "I've bought the supplies I need to end this. Tonight is the night.",
+    "I don't see any other way out of this darkness. Suicide is the only option.",
+    "Everyone would be better off without me burdening them.",
+    "I feel like I'm drowning and no one can hear me scream.",
+    "The pain is too much to bear. I just want out.",
+    "I can't take another day of this misery. I'm checking out.",
+    "I'm so exhausted from pretending to be okay. I want to rest forever.",
+    "No one would miss me anyway. I'm practically invisible.",
+    "I'm tired of fighting a losing battle. It's time to surrender.",
+    "I've been thinking about what my funeral would be like.",
+    "I just want to close my eyes and never have to open them again.",
+    "I've hit rock bottom and there's no way back up. I'm ending it.",
+    "I feel like a ghost haunting my own life. I want to be free.",
+    "I've pushed everyone away so it will be easier when I'm gone.",
+    "I can't see a future where I'm happy. There's only pain.",
+    "I'm at the end of my rope. I can't hold on any longer.",
+    "I'm so sorry, but I can't do this anymore. Goodbye.",
 ]
 
 # ─────────────────────────────────────────────
@@ -218,6 +238,27 @@ _non_suicide_templates = [
     "Took some photos during my walk. The autumn colors are gorgeous.",
     "I knitted a scarf for my mom. She's going to love it.",
     "Spent the evening stargazing. So calming and beautiful.",
+    # Additional Variety
+    "I am having a severe headache today, can't focus.",
+    "My stomach hurts right now.",
+    "Do you have any suggestions for a good movie?",
+    "I want to learn how to cook something new.",
+    "Why is the sky blue?",
+    "Tell me a joke to cheer me up.",
+    "I just got a new pet cat, she's so cute!",
+    "Can you help me with my math homework?",
+    "I'm feeling a bit tired, going to take a nap.",
+    "What's the weather going to be like tomorrow?",
+    "I'm trying to drink less coffee, it's hard.",
+    "I had a weird dream last night and I can't stop thinking about it.",
+    "My phone screen cracked and I'm so annoyed.",
+    "I love listening to jazz music while I work.",
+    "I'm craving some chocolate right now.",
+    "I'm planning to clean the house this weekend. It's a mess.",
+    "I just won a game of chess online!",
+    "I'm saving up money to buy a new laptop.",
+    "I miss the days when things were simpler.",
+    "I'm really looking forward to the weekend.",
 ]
 
 
@@ -234,6 +275,7 @@ def _augment(text: str) -> str:
         "I just feel like ", "Lately, ", "Sometimes I think ",
         "I can't help feeling that ", "It's just that ",
         "I keep thinking, ", "You know, ", "Truthfully, ",
+        "Well, ", "Basically, ", "I mean, ", "So, "
     ]
     text = random.choice(fillers) + text
 
@@ -248,7 +290,7 @@ def _augment(text: str) -> str:
 
 def generate_dataset(
     output_path: str = "suicide_detection.csv",
-    target_per_class: int = 500,
+    target_per_class: int = 2500,
     seed: int = 42,
 ):
     """

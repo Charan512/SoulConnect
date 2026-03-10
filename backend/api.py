@@ -79,6 +79,7 @@ def _init_db():
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
+            session_id TEXT DEFAULT 'default',
             time TEXT,
             user_msg TEXT,
             bot_msg TEXT,
@@ -88,6 +89,10 @@ def _init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
     """)
+    try:
+        conn.execute("ALTER TABLE chats ADD COLUMN session_id TEXT DEFAULT 'default'")
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 
@@ -161,20 +166,51 @@ async def lifespan(app: FastAPI):
         llm_model = None
     else:
         try:
-            print("[startup] Loading LLM (microsoft/phi-2) ...")
-            model_name = "microsoft/phi-2"
+            print("[startup] Loading LLM (TinyLlama/TinyLlama-1.1B-Chat-v1.0) ...")
+            model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             config = AutoConfig.from_pretrained(model_name)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
             if not hasattr(config, "pad_token_id") or config.pad_token_id is None:
                 config.pad_token_id = tokenizer.pad_token_id
+            # Enable Mac GPU (MPS) securely avoiding huge allocator warmup failure
+            target_device = None
+            if torch.cuda.is_available():
+                dtype = torch.float16
+                device_map = "auto"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                dtype = torch.float16
+                device_map = None
+                target_device = "mps"
+            else:
+                dtype = torch.float32
+                device_map = "auto"
+
+            load_kwargs = {
+                "config": config,
+                "torch_dtype": dtype,
+            }
+            if device_map is not None:
+                load_kwargs["device_map"] = device_map
+
             llm_model = AutoModelForCausalLM.from_pretrained(
-                model_name, config=config,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto",
+                model_name, **load_kwargs
             )
-            print("[startup] LLM loaded")
+            
+            if target_device is not None:
+                llm_model.to(target_device)
+            # If any params are on meta device, model is disk-offloaded → too slow on CPU
+            offloaded = any(
+                p.device.type == "meta"
+                for p in llm_model.parameters()
+            )
+            if offloaded:
+                print("[startup] LLM params disk-offloaded (no GPU) — using fast fallback responses.")
+                tokenizer = None
+                llm_model = None
+            else:
+                print("[startup] LLM loaded")
         except BaseException as e:
             print(f"[startup] WARNING: LLM failed ({e})")
             tokenizer = None
@@ -195,9 +231,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+frontend_url = os.environ.get("FRONTEND_URL")
+allowed_origins = [frontend_url] if frontend_url else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -261,6 +300,12 @@ class HistoryRecord(BaseModel):
     sentiment: str
     emotion: str
     risk: str
+    session_id: str
+
+class SessionRecord(BaseModel):
+    session_id: str
+    title: str
+    last_updated: str
 
 
 # ─────────────────────────────────────────────────────
@@ -308,38 +353,68 @@ def _get_activity_instruction(therapy):
 
 def _generate_llm_response(user_text, sentiment, emotion, risk, therapy, mode,
                             session_id="default", emergency_contact=None):
-    if mode == "EMERGENCY":
-        msg = ("I am concerned about your safety.\n\n"
-               "Please reach out immediately:\n"
-               "India Helpline: 9152987821\n"
-               "AASRA: +91-9820466726\n\n"
-               "You matter and you are not alone.")
-        if emergency_contact:
-            msg += f"\n\nEmergency alert sent to: {emergency_contact}"
-        return msg
 
     history = conversation_buffers.get(session_id, [])
-    history_text = "\n".join(f"{r}: {m}" for r, m in history[-3:])
-    activity = _get_activity_instruction(therapy)
+    
+    # Detect if this is likely small talk: very short input and low risk
+    is_short = len(user_text.split()) < 8
+    is_casual = is_short and risk == "LOW" and sentiment.lower() in ["positive", "neutral", "label_1", "label_2"]
+    
+    if mode == "EMERGENCY":
+        rules = (
+            "CRITICAL PROTOCOL: The user is expressing severe distress, self-harm, or suicidal ideation. "
+            "Your immediate goal is to de-escalate, provide extreme empathy, and anchor them to the present moment. "
+            "Do NOT tell them you are calling emergency services. Do NOT give them generic hotline numbers. "
+            "Just listen to them and try to find one small reason for them to keep talking to you."
+        )
+        activity_text = "Activity: Ask them to take a single deep breath with you, or tell you one thing they can see right now."
+    elif is_casual:
+        rules = "Rules: The user is making casual conversation or a brief statement. Respond naturally, warmly, and concisely in 1-2 friendly sentences. Be conversational like a normal person."
+        activity_text = ""
+    else:
+        activity = _get_activity_instruction(therapy)
+        rules = "Rules: Acknowledge feelings, 4-6 lines, 1 practical suggestion, no emojis, no medical advice, no generic phrases."
+        activity_text = f"Activity: {activity}\n\n"
 
-    prompt = (
-        "You are a warm, empathetic mental health support assistant.\n\n"
-        f"Emotion: {emotion} | Sentiment: {sentiment} | Risk: {risk} | "
-        f"Therapy: {therapy} | Mode: {mode}\n\n"
-        f"Recent:\n{history_text}\n\nUser: {user_text}\n\n"
-        "Rules: Acknowledge feelings, 4-6 lines, 1 practical suggestion, "
-        "no emojis, no medical advice, no generic phrases.\n\n"
-        f"Activity: {activity}\n\nAssistant:\n"
+    system_msg = (
+        "You are 'Soul Connect', a helpful empathetic mental health companion.\n"
+        "Talk directly to the user in short conversational English responses.\n"
+        "NEVER write emails, letters, or manuals. NEVER explain your own rules. NEVER translate this prompt.\n"
+        "Just reply to the user naturally and directly.\n"
+        f"{rules} {activity_text}"
     )
+    
+    prompt = f"<|system|>\n{system_msg.strip()}</s>\n"
+    
+    for role, text in history[-3:]:
+        if role == "User":
+            prompt += f"<|user|>\n{text.strip()}</s>\n"
+        else:
+            prompt += f"<|assistant|>\n{text.strip()}</s>\n"
+            
+    prompt += f"<|user|>\n{user_text.strip()}</s>\n<|assistant|>\n"
 
     inputs = tokenizer(prompt, return_tensors="pt").to(llm_model.device)
     outputs = llm_model.generate(
-        **inputs, max_new_tokens=120, temperature=0.7, top_p=0.9,
-        repetition_penalty=1.3, no_repeat_ngram_size=3, do_sample=True,
-        pad_token_id=tokenizer.pad_token_id,
+        **inputs, max_new_tokens=300, temperature=0.3, top_p=0.85,
+        repetition_penalty=1.15, do_sample=True,
+        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
     )
-    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    response = text.split("Assistant:")[-1].strip()
+    text = tokenizer.decode(outputs[0], skip_special_tokens=False)
+    
+    # We used skip_special_tokens=False so we can reliably split on <|assistant|>. Then we clean up.
+    response = text.split("<|assistant|>")[-1].replace("</s>", "").strip()
+    
+    # Hard cutoff if the model hallucinates a continuation of the conversation or writes a letter
+    for cutoff in ["<|user|>", "User:", "\nUser", "Dear User", "Dear Conversational", "Dear [Name]:", "Dear [Name],"]:
+        if cutoff in response:
+            response = response.split(cutoff)[0].strip()
+            
+    # If the response still starts with a letter-like greeting, strip the first line
+    if response.startswith("Dear"):
+        parts = response.split("\n", 1)
+        if len(parts) > 1:
+            response = parts[1].strip()
 
     if session_id not in conversation_buffers:
         conversation_buffers[session_id] = []
@@ -555,9 +630,9 @@ async def chat(
 
     # Save to DB
     conn.execute(
-        "INSERT INTO chats (user_id, time, user_msg, bot_msg, sentiment, emotion, risk) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (current_user["user_id"], str(datetime.datetime.now()),
+        "INSERT INTO chats (user_id, session_id, time, user_msg, bot_msg, sentiment, emotion, risk) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (current_user["user_id"], req.session_id, str(datetime.datetime.now()),
          req.text, response, sentiment, emotion, risk),
     )
     conn.commit()
@@ -573,20 +648,49 @@ async def chat(
 # ═════════════════════════════════════════════════════
 # HISTORY
 # ═════════════════════════════════════════════════════
-@app.get("/history", response_model=list[HistoryRecord], tags=["History"])
+@app.get("/sessions", response_model=list[SessionRecord], tags=["History"])
+async def get_sessions(current_user: dict = Depends(get_current_user)):
+    conn = _get_conn()
+    rows = conn.execute("""
+        SELECT session_id, 
+               MAX(time) as last_updated,
+               (SELECT user_msg FROM chats c2 WHERE c2.session_id = c1.session_id AND c2.user_id = c1.user_id ORDER BY id ASC LIMIT 1) as title
+        FROM chats c1
+        WHERE user_id=?
+        GROUP BY session_id
+        ORDER BY last_updated DESC
+    """, (current_user["user_id"],)).fetchall()
+    conn.close()
+    
+    sessions = []
+    for r in rows:
+        session_id = r["session_id"] or "default"
+        title = r["title"] or "New Chat"
+        if len(title) > 40:
+            title = title[:37] + "..."
+        sessions.append(SessionRecord(
+            session_id=session_id,
+            title=title,
+            last_updated=r["last_updated"]
+        ))
+    return sessions
+
+
+@app.get("/history/{session_id}", response_model=list[HistoryRecord], tags=["History"])
 async def get_history(
+    session_id: str,
     limit: int = Query(default=50, ge=1, le=500),
     current_user: dict = Depends(get_current_user),
 ):
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT * FROM chats WHERE user_id=? ORDER BY id DESC LIMIT ?",
-        (current_user["user_id"], limit),
+        "SELECT * FROM chats WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT ?",
+        (current_user["user_id"], session_id, limit),
     ).fetchall()
     conn.close()
     return [HistoryRecord(id=r["id"], time=r["time"], user_msg=r["user_msg"],
                           bot_msg=r["bot_msg"], sentiment=r["sentiment"],
-                          emotion=r["emotion"], risk=r["risk"]) for r in rows]
+                          emotion=r["emotion"], risk=r["risk"], session_id=r["session_id"] if "session_id" in r.keys() else "default") for r in rows]
 
 
 @app.delete("/history", tags=["History"])
