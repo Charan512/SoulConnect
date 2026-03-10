@@ -2,6 +2,8 @@
 
 Soul Connect is an intelligent mental health assistant designed to provide emotional support, risk assessment, and crisis intervention through a conversational interface. It combines advanced NLP models with a robust React & FastAPI architecture to deliver a safe, responsive, and aesthetically pleasing user experience.
 
+![System Architecture](file:///Users/sriramcharannalla/.gemini/antigravity/brain/f2108c0e-a75c-45b9-907d-926e2629f14c/soul_connect_architecture_1773153078972.png)
+
 ## ✨ Features
 
 - **Engaging UI/UX**: Includes a welcoming entry page and a fully featured Landing page explaining the mission, features, and FAQs.

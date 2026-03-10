@@ -482,7 +482,7 @@ def _fallback_response(sentiment, emotion, therapy, mode):
 # ─────────────────────────────────────────────────────
 # TWILIO EMERGENCY CALL
 # ─────────────────────────────────────────────────────
-def trigger_emergency_call(contact_number: str, username: str):
+def trigger_emergency_call(contact_number: str, username: str, trigger_message: str):
     """
     Triggers an automated voice call via Twilio to the emergency contact.
     This function should be run as a background task.
@@ -491,14 +491,17 @@ def trigger_emergency_call(contact_number: str, username: str):
         print("[Twilio] WARNING: Twilio credentials not fully configured. Cannot place call.")
         return
 
-    # Keep it brief and clear
+    # Keep it brief but highly descriptive of the triggering event
     twiml_msg = (
         f"<Response>"
         f"<Say voice='alice' language='en-US'>"
         f"Emergency Alert from Mind Care A I. "
-        f"Someone you are listed as an emergency contact for, named {username}, "
-        f"may be in immediate emotional distress and at high risk. "
-        f"Please check on them immediately."
+        f"This call is to warn you about your friend {username}, who is currently feeling severe mental distress. "
+        f"They just sent the following high-risk message to their chatbot: "
+        f"<Pause length='1'/>"
+        f"'{trigger_message}'"
+        f"<Pause length='1'/>"
+        f"Please contact or help them as soon as possible."
         f"</Say>"
         f"</Response>"
     )
@@ -611,7 +614,7 @@ async def chat(
 
     # Trigger Emergency Call if HIGH risk
     if mode == "EMERGENCY" and emergency_contact:
-        background_tasks.add_task(trigger_emergency_call, emergency_contact, current_user["username"])
+        background_tasks.add_task(trigger_emergency_call, emergency_contact, current_user["username"], req.text)
 
     # Generate Response
     if llm_model is None or tokenizer is None:
