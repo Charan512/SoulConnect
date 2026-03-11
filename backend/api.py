@@ -507,11 +507,17 @@ def trigger_emergency_call(contact_number: str, username: str, trigger_message: 
     )
 
     try:
-        print(f"[Twilio] Initiating emergency voice call to {contact_number} for user {username}...")
+        # Auto-format 10-digit Indian numbers since Twilio requires E.164
+        formatted_number = contact_number
+        if len(contact_number) == 10 and contact_number.isdigit():
+            formatted_number = f"+91{contact_number}"
+            
+        print(f"[Twilio] Initiating emergency voice call to {formatted_number} for user {username}...")
         client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         call = client.calls.create(
             twiml=twiml_msg,
-            to=contact_number,
+            to=formatted_number,
+
             from_=TWILIO_PHONE_NUMBER
         )
         print(f"[Twilio] Call initiated successfully. Call SID: {call.sid}")
