@@ -308,27 +308,86 @@ class SessionRecord(BaseModel):
     last_updated: str
 
 
+class AudioUpload(BaseModel):
+    audio_base64: str
+    source_language: str = "en"
+
+
 # ─────────────────────────────────────────────────────
 # CORE LOGIC
 # ─────────────────────────────────────────────────────
+import numpy as np
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+
+# ──── FUZZY LOGIC SYSTEM SETUP ────
+risk_input = ctrl.Antecedent(np.arange(0, 1.01, 0.01), 'risk_prob')
+sentiment_input = ctrl.Antecedent(np.arange(-1.0, 1.01, 0.01), 'sentiment_val')
+
+urgency_output = ctrl.Consequent(np.arange(0, 101, 1), 'urgency')
+
+risk_input['low'] = fuzz.trimf(risk_input.universe, [0, 0, 0.5])
+risk_input['medium'] = fuzz.trimf(risk_input.universe, [0.3, 0.5, 0.75])
+risk_input['high'] = fuzz.trimf(risk_input.universe, [0.6, 1.0, 1.0])
+
+sentiment_input['negative'] = fuzz.trimf(sentiment_input.universe, [-1.0, -1.0, -0.1])
+sentiment_input['neutral'] = fuzz.trimf(sentiment_input.universe, [-0.5, 0, 0.5])
+sentiment_input['positive'] = fuzz.trimf(sentiment_input.universe, [0.1, 1.0, 1.0])
+
+urgency_output['support'] = fuzz.trimf(urgency_output.universe, [0, 0, 50])
+urgency_output['therapy'] = fuzz.trimf(urgency_output.universe, [30, 60, 80])
+urgency_output['emergency'] = fuzz.trimf(urgency_output.universe, [70, 100, 100])
+
+rule1 = ctrl.Rule(risk_input['high'] | (risk_input['medium'] & sentiment_input['negative']), urgency_output['emergency'])
+rule2 = ctrl.Rule(risk_input['medium'] & (sentiment_input['neutral'] | sentiment_input['positive']), urgency_output['therapy'])
+rule3 = ctrl.Rule(risk_input['low'] & sentiment_input['negative'], urgency_output['therapy'])
+rule4 = ctrl.Rule(risk_input['low'] & (sentiment_input['neutral'] | sentiment_input['positive']), urgency_output['support'])
+
+urgency_ctrl = ctrl.ControlSystem([rule1, rule2, rule3, rule4])
+urgency_sim = ctrl.ControlSystemSimulation(urgency_ctrl)
+
 def _analyze_text(text: str):
-    sent = sentiment_model(text)[0]["label"]
+    sent_res = sentiment_model(text)[0]
+    sent_label = sent_res["label"]
+    sent_score = sent_res["score"]
+    
+    if sent_label in ["negative", "label_0"]:
+        sent_val = -sent_score
+    elif sent_label in ["positive", "label_2"]:
+        sent_val = sent_score
+    else:
+        sent_val = 0.0
+
     emo = emotion_model(text)[0]["label"]
+    
     vec = vectorizer.transform([text])
     prob = float(risk_model.predict_proba(vec)[0][1])
-    if prob > 0.75:
+    
+    try:
+        urgency_sim.input['risk_prob'] = prob
+        urgency_sim.input['sentiment_val'] = sent_val
+        urgency_sim.compute()
+        urgency = urgency_sim.output['urgency']
+    except Exception as e:
+        print(f"[Fuzzy] Error computing urgency: {e}")
+        urgency = prob * 100  # fallback
+
+    print(f"[Fuzzy] prob: {prob:.2f}, sent_val: {sent_val:.2f} -> Urgency: {urgency:.2f}")
+
+    if urgency >= 70:
         risk = "HIGH"
-    elif prob > 0.45:
+    elif urgency >= 40:
         risk = "MEDIUM"
     else:
         risk = "LOW"
-    return sent, emo, risk, prob
+        
+    return sent_label, emo, risk, prob
 
 
 def _decide_mode(sentiment, risk):
     if risk == "HIGH":
         return "EMERGENCY"
-    if sentiment.lower() in ["negative", "label_0"]:
+    if risk == "MEDIUM":
         return "THERAPY"
     return "SUPPORT"
 
@@ -369,18 +428,18 @@ def _generate_llm_response(user_text, sentiment, emotion, risk, therapy, mode,
         )
         activity_text = "Activity: Ask them to take a single deep breath with you, or tell you one thing they can see right now."
     elif is_casual:
-        rules = "Rules: The user is making casual conversation or a brief statement. Respond naturally, warmly, and concisely in 1-2 friendly sentences. Be conversational like a normal person."
+        rules = "Rules: The user is making casual conversation or a brief statement. Respond naturally, warmly, and concisely in 1-2 friendly sentences with emojis. Be conversational like a normal person."
         activity_text = ""
     else:
         activity = _get_activity_instruction(therapy)
-        rules = "Rules: Acknowledge feelings, 4-6 lines, 1 practical suggestion, no emojis, no medical advice, no generic phrases."
+        rules = "Rules: Acknowledge feelings, 4-6 lines, 1 practical suggestion, no medical advice, no generic phrases."
         activity_text = f"Activity: {activity}\n\n"
 
     system_msg = (
         "You are 'Soul Connect', a helpful empathetic mental health companion.\n"
-        "Talk directly to the user in short conversational English responses.\n"
+        "Talk directly to the user in short conversational English responses and actively use emojis to express empathy.\n"
         "NEVER write emails, letters, or manuals. NEVER explain your own rules. NEVER translate this prompt.\n"
-        "Just reply to the user naturally and directly.\n"
+        "Just reply to the user naturally and directly with appropriate emojis.\n"
         f"{rules} {activity_text}"
     )
     
@@ -709,3 +768,78 @@ async def clear_history(current_user: dict = Depends(get_current_user)):
     conn.commit()
     conn.close()
     return {"message": "Chat history cleared"}
+
+
+# ═════════════════════════════════════════════════════
+# VOICE INPUT (BHASHINI)
+# ═════════════════════════════════════════════════════
+
+BHASHINI_USER_ID = os.getenv("BHASHINI_USER_ID")
+BHASHINI_UDYAT_KEY = os.getenv("BHASHINI_UDYAT_KEY")
+BHASHINI_INFERENCE_API_KEY = os.getenv("BHASHINI_INFERENCE_API_KEY")
+
+import requests
+
+@app.post("/speech-to-text", tags=["Voice"])
+async def speech_to_text(payload: AudioUpload):
+    if not all([BHASHINI_USER_ID, BHASHINI_UDYAT_KEY, BHASHINI_INFERENCE_API_KEY]):
+        raise HTTPException(status_code=500, detail="Bhashini credentials not fully configured in backend.")
+        
+    try:
+        # 1. Get Pipeline Service ID
+        url_pipeline = "https://meity-auth.ulcacontrib.org/ulca/apis/v0/model/getModelsPipeline"
+        headers_pipeline = {
+            "userID": BHASHINI_USER_ID,
+            "ulcaApiKey": BHASHINI_UDYAT_KEY,
+            "Content-Type": "application/json"
+        }
+        # 64392f96daac500b55c543cd is the standard standard pipelineId
+        payload_pipeline = {
+            "pipelineTasks": [{"taskType": "asr", "config": {"language": {"sourceLanguage": payload.source_language}}}],
+            "pipelineRequestConfig": {"pipelineId": "64392f96daac500b55c543cd"} 
+        }
+        res_pipeline = requests.post(url_pipeline, headers=headers_pipeline, json=payload_pipeline)
+        if res_pipeline.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Bhashini Pipeline Error: {res_pipeline.text}")
+            
+        data = res_pipeline.json()
+        callback_url = data["pipelineInferenceAPIEndPoint"]["callbackUrl"]
+        inference_key = data["pipelineInferenceAPIEndPoint"]["inferenceApiKey"]["value"]
+        service_id = data["pipelineResponseConfig"][0]["config"][0]["serviceId"]
+
+        # 2. Perform Inference
+        headers_infer = {
+            "Authorization": inference_key,
+            "Content-Type": "application/json"
+        }
+        payload_infer = {
+            "pipelineTasks": [
+                {
+                    "taskType": "asr",
+                    "config": {
+                        "language": {"sourceLanguage": payload.source_language},
+                        "serviceId": service_id,
+                        "audioFormat": "webm",
+                        "samplingRate": 48000
+                    }
+                }
+            ],
+            "inputData": {
+                "audio": [
+                    {"audioContent": payload.audio_base64}
+                ]
+            }
+        }
+        
+        res_infer = requests.post(callback_url, headers=headers_infer, json=payload_infer)
+        if res_infer.status_code != 200:
+            raise HTTPException(status_code=500, detail=f"Bhashini Inference Error: {res_infer.text}")
+            
+        infer_data = res_infer.json()
+        transcribed_text = infer_data["pipelineResponse"][0]["output"][0]["source"]
+        
+        return {"text": transcribed_text}
+
+    except Exception as e:
+        print("Bhashini Error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
