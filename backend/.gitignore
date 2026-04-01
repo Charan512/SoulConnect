@@ -1,3 +1,26 @@
+# Environments
 .env
-venv
+.venv
+venv/
+ENV/
+
+# Python Cache
 __pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Models / Temporary Tracking
+*.log
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
