@@ -408,8 +408,6 @@ def _get_activity_instruction(therapy):
         "STRESS": "Suggest a stress-relief action.",
         "CBT": "Help reframe thoughts gently.",
     }.get(therapy, "Suggest a calming activity.")
-
-
 def _generate_llm_response(user_text, sentiment, emotion, risk, therapy, mode,
                             session_id="default", emergency_contact=None):
 
