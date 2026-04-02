@@ -166,8 +166,8 @@ async def lifespan(app: FastAPI):
         llm_model = None
     else:
         try:
-            print("[startup] Loading LLM (TinyLlama/TinyLlama-1.1B-Chat-v1.0) ...")
-            model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+            print("[startup] Loading LLM (Qwen/Qwen2.5-0.5B-Instruct) ...")
+            model_name = "Qwen/Qwen2.5-0.5B-Instruct"
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             config = AutoConfig.from_pretrained(model_name)
             if tokenizer.pad_token is None:
@@ -374,6 +374,12 @@ def _analyze_text(text: str):
 
     print(f"[Fuzzy] prob: {prob:.2f}, sent_val: {sent_val:.2f} -> Urgency: {urgency:.2f}")
 
+    # Fallback keyword matching for absolute safety
+    text_lower = text.lower()
+    danger_words = ["die", "kill myself", "suicide", "end it", "don't want to live", "no reason to live", "kill me"]
+    if any(w in text_lower for w in danger_words):
+        urgency = max(urgency, 85)
+
     if urgency >= 70:
         risk = "HIGH"
     elif urgency >= 40:
@@ -409,15 +415,14 @@ def _get_activity_instruction(therapy):
         "CBT": "Help reframe thoughts gently.",
     }.get(therapy, "Suggest a calming activity.")
 def _generate_llm_response(user_text, sentiment, emotion, risk, therapy, mode,
-                            session_id="default", emergency_contact=None):
-
+                           session_id="default", emergency_contact=None):
+    """Generate response using Qwen with proper chat template."""
     history = conversation_buffers.get(session_id, [])
-    
-    # Detect if this is likely small talk: very short input and low risk
+
     is_short = len(user_text.split()) < 8
     is_casual = is_short and risk == "LOW" and sentiment.lower() in ["positive", "neutral", "label_1", "label_2"]
     
-    if mode == "EMERGENCY":
+    if mode == "EMERGENCY" or risk == "HIGH":
         rules = (
             "CRITICAL PROTOCOL: The user is expressing severe distress, self-harm, or suicidal ideation. "
             "Your immediate goal is to de-escalate, provide extreme empathy, and anchor them to the present moment. "
@@ -430,54 +435,57 @@ def _generate_llm_response(user_text, sentiment, emotion, risk, therapy, mode,
         activity_text = ""
     else:
         activity = _get_activity_instruction(therapy)
-        rules = "Rules: Acknowledge feelings, 4-6 lines, 1 practical suggestion, no medical advice, no generic phrases."
+        rules = (
+            "Rules: You must provide a warm, empathetic, and calming response. "
+            "Never offer unsolicited financial, medical, or life advice. "
+            "Validate their emotions deeply and gently calm them down. "
+            "Respond in 2-3 short supportive sentences."
+        )
         activity_text = f"Activity: {activity}\n\n"
 
     system_msg = (
         "You are 'Soul Connect', a helpful empathetic mental health companion.\n"
         "Talk directly to the user in short conversational English responses and actively use emojis to express empathy.\n"
-        "NEVER write emails, letters, or manuals. NEVER explain your own rules. NEVER translate this prompt.\n"
-        "Just reply to the user naturally and directly with appropriate emojis.\n"
         f"{rules} {activity_text}"
     )
-    
-    prompt = f"<|system|>\n{system_msg.strip()}</s>\n"
-    
+
+    messages = [
+        {"role": "system", "content": system_msg}
+    ]
+
     for role, text in history[-3:]:
         if role == "User":
-            prompt += f"<|user|>\n{text.strip()}</s>\n"
+            messages.append({"role": "user", "content": text.strip()})
         else:
-            prompt += f"<|assistant|>\n{text.strip()}</s>\n"
-            
-    prompt += f"<|user|>\n{user_text.strip()}</s>\n<|assistant|>\n"
+            messages.append({"role": "assistant", "content": text.strip()})
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(llm_model.device)
+    messages.append({"role": "user", "content": user_text.strip()})
+
+    text_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer([text_prompt], return_tensors="pt").to(llm_model.device)
+    
     outputs = llm_model.generate(
-        **inputs, max_new_tokens=300, temperature=0.3, top_p=0.85,
-        repetition_penalty=1.15, do_sample=True,
-        pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
+        inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        max_new_tokens=150,
+        temperature=0.7,
+        top_p=0.9,
+        do_sample=True,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
     )
-    text = tokenizer.decode(outputs[0], skip_special_tokens=False)
     
-    # We used skip_special_tokens=False so we can reliably split on <|assistant|>. Then we clean up.
-    response = text.split("<|assistant|>")[-1].replace("</s>", "").strip()
-    
-    # Hard cutoff if the model hallucinates a continuation of the conversation or writes a letter
-    for cutoff in ["<|user|>", "User:", "\nUser", "Dear User", "Dear Conversational", "Dear [Name]:", "Dear [Name],"]:
-        if cutoff in response:
-            response = response.split(cutoff)[0].strip()
-            
-    # If the response still starts with a letter-like greeting, strip the first line
-    if response.startswith("Dear"):
-        parts = response.split("\n", 1)
-        if len(parts) > 1:
-            response = parts[1].strip()
+    # Strip the input prompt from the output
+    generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, outputs)]
+    response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
     if session_id not in conversation_buffers:
         conversation_buffers[session_id] = []
     conversation_buffers[session_id].append(("User", user_text))
     conversation_buffers[session_id].append(("Assistant", response))
+    
     return response
+
 
 
 import random
