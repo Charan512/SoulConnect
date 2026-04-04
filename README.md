@@ -107,5 +107,3 @@ If you want to append new data to the Suicide Risk Classifier:
 4. Overwrite confirmation will appear, saving the new `risk_model.pkl`. 
 
 ## License
-
-MIT

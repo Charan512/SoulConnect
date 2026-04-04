@@ -16,7 +16,8 @@ Run:
 """
 
 import os
-import sqlite3
+import pymongo
+from bson.objectid import ObjectId
 import datetime
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -61,46 +62,15 @@ conversation_buffers: dict = {}
 # ─────────────────────────────────────────────────────
 # DATABASE
 # ─────────────────────────────────────────────────────
-DB_PATH = "chat_history.db"
+MONGO_URL = os.environ.get("MONGO_URL")
+mongo_client = None
+db = None
 
-
-def _init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            emergency_contact TEXT,
-            created_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS chats (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            session_id TEXT DEFAULT 'default',
-            time TEXT,
-            user_msg TEXT,
-            bot_msg TEXT,
-            sentiment TEXT,
-            emotion TEXT,
-            risk TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(id)
-        )
-    """)
+def _get_query_user_id(user_id):
     try:
-        conn.execute("ALTER TABLE chats ADD COLUMN session_id TEXT DEFAULT 'default'")
-    except sqlite3.OperationalError:
-        pass
-    conn.commit()
-    conn.close()
-
-
-def _get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+        return int(user_id)
+    except ValueError:
+        return str(user_id)
 
 
 # ─────────────────────────────────────────────────────
@@ -216,7 +186,11 @@ async def lifespan(app: FastAPI):
             tokenizer = None
             llm_model = None
 
-    _init_db()
+    global mongo_client, db
+    if MONGO_URL:
+        mongo_client = pymongo.MongoClient(MONGO_URL)
+        db = mongo_client["Aipowered"]
+        print("[startup] Connected to MongoDB")
     print("[startup] Server ready!")
     yield
     print("[shutdown] Done.")
@@ -260,7 +234,7 @@ class LoginRequest(BaseModel):
 class AuthResponse(BaseModel):
     token: str
     username: str
-    user_id: int
+    user_id: str
 
 
 class AnalyzeRequest(BaseModel):
@@ -293,7 +267,7 @@ class ChatResponse(BaseModel):
 
 
 class HistoryRecord(BaseModel):
-    id: int
+    id: str
     time: str
     user_msg: str
     bot_msg: str
@@ -595,20 +569,18 @@ def trigger_emergency_call(contact_number: str, username: str, trigger_message: 
 # ═════════════════════════════════════════════════════
 @app.post("/register", response_model=AuthResponse, tags=["Auth"])
 async def register(req: RegisterRequest):
-    conn = _get_conn()
-    existing = conn.execute("SELECT id FROM users WHERE username=?", (req.username,)).fetchone()
+    existing = db.users.find_one({"username": req.username})
     if existing:
-        conn.close()
         raise HTTPException(status_code=400, detail="Username already exists")
 
     pw_hash = _bcrypt.hashpw(req.password.encode(), _bcrypt.gensalt()).decode()
-    cursor = conn.execute(
-        "INSERT INTO users (username, password_hash, emergency_contact, created_at) VALUES (?,?,?,?)",
-        (req.username, pw_hash, req.emergency_contact, str(datetime.datetime.now())),
-    )
-    conn.commit()
-    user_id = cursor.lastrowid
-    conn.close()
+    res = db.users.insert_one({
+        "username": req.username,
+        "password_hash": pw_hash,
+        "emergency_contact": req.emergency_contact,
+        "created_at": str(datetime.datetime.now())
+    })
+    user_id = str(res.inserted_id)
 
     token = _create_token(user_id, req.username)
     return AuthResponse(token=token, username=req.username, user_id=user_id)
@@ -616,26 +588,24 @@ async def register(req: RegisterRequest):
 
 @app.post("/login", response_model=AuthResponse, tags=["Auth"])
 async def login(req: LoginRequest):
-    conn = _get_conn()
-    user = conn.execute("SELECT * FROM users WHERE username=?", (req.username,)).fetchone()
-    conn.close()
+    user = db.users.find_one({"username": req.username})
 
     if not user or not _bcrypt.checkpw(req.password.encode(), user["password_hash"].encode()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = _create_token(user["id"], user["username"])
-    return AuthResponse(token=token, username=user["username"], user_id=user["id"])
+    user_id = str(user.get("id", str(user["_id"])))
+    token = _create_token(user_id, user["username"])
+    return AuthResponse(token=token, username=user["username"], user_id=user_id)
 
 
 @app.get("/me", tags=["Auth"])
 async def get_me(current_user: dict = Depends(get_current_user)):
-    conn = _get_conn()
-    user = conn.execute("SELECT id, username, emergency_contact, created_at FROM users WHERE id=?",
-                        (current_user["user_id"],)).fetchone()
-    conn.close()
+    q_id = _get_query_user_id(current_user["user_id"])
+    search = {"id": q_id} if isinstance(q_id, int) else {"_id": ObjectId(q_id)}
+    user = db.users.find_one(search)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return dict(user)
+    return {"id": str(user.get("id", str(user["_id"]))), "username": user["username"], "emergency_contact": user.get("emergency_contact"), "created_at": user.get("created_at")}
 
 
 # ═════════════════════════════════════════════════════
@@ -678,10 +648,10 @@ async def chat(
     therapy = _select_therapy(emotion)
 
     # Get user's emergency contact
-    conn = _get_conn()
-    user = conn.execute("SELECT emergency_contact FROM users WHERE id=?",
-                        (current_user["user_id"],)).fetchone()
-    emergency_contact = user["emergency_contact"] if user else None
+    q_id = _get_query_user_id(current_user["user_id"])
+    search = {"id": q_id} if isinstance(q_id, int) else {"_id": ObjectId(q_id)}
+    user = db.users.find_one(search)
+    emergency_contact = user["emergency_contact"] if user and "emergency_contact" in user else None
 
     # Trigger Emergency Call if HIGH risk
     if mode == "EMERGENCY" and emergency_contact:
@@ -703,14 +673,16 @@ async def chat(
         )
 
     # Save to DB
-    conn.execute(
-        "INSERT INTO chats (user_id, session_id, time, user_msg, bot_msg, sentiment, emotion, risk) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (current_user["user_id"], req.session_id, str(datetime.datetime.now()),
-         req.text, response, sentiment, emotion, risk),
-    )
-    conn.commit()
-    conn.close()
+    db.chats.insert_one({
+        "user_id": _get_query_user_id(current_user["user_id"]),
+        "session_id": req.session_id,
+        "time": str(datetime.datetime.now()),
+        "user_msg": req.text,
+        "bot_msg": response,
+        "sentiment": sentiment,
+        "emotion": emotion,
+        "risk": risk
+    })
 
     return ChatResponse(
         response=response, sentiment=sentiment, emotion=emotion, risk=risk,
@@ -724,21 +696,21 @@ async def chat(
 # ═════════════════════════════════════════════════════
 @app.get("/sessions", response_model=list[SessionRecord], tags=["History"])
 async def get_sessions(current_user: dict = Depends(get_current_user)):
-    conn = _get_conn()
-    rows = conn.execute("""
-        SELECT session_id, 
-               MAX(time) as last_updated,
-               (SELECT user_msg FROM chats c2 WHERE c2.session_id = c1.session_id AND c2.user_id = c1.user_id ORDER BY id ASC LIMIT 1) as title
-        FROM chats c1
-        WHERE user_id=?
-        GROUP BY session_id
-        ORDER BY last_updated DESC
-    """, (current_user["user_id"],)).fetchall()
-    conn.close()
-    
+    q_id = _get_query_user_id(current_user["user_id"])
+    pipeline = [
+        {"$match": {"user_id": q_id}},
+        {"$sort": {"_id": 1}},
+        {"$group": {
+            "_id": {"$ifNull": ["$session_id", "default"]},
+            "last_updated": {"$last": "$time"},
+            "title": {"$first": "$user_msg"}
+        }},
+        {"$sort": {"last_updated": -1}}
+    ]
+    rows = list(db.chats.aggregate(pipeline))
     sessions = []
     for r in rows:
-        session_id = r["session_id"] or "default"
+        session_id = r["_id"]
         title = r["title"] or "New Chat"
         if len(title) > 40:
             title = title[:37] + "..."
@@ -756,24 +728,26 @@ async def get_history(
     limit: int = Query(default=50, ge=1, le=500),
     current_user: dict = Depends(get_current_user),
 ):
-    conn = _get_conn()
-    rows = conn.execute(
-        "SELECT * FROM chats WHERE user_id=? AND session_id=? ORDER BY id DESC LIMIT ?",
-        (current_user["user_id"], session_id, limit),
-    ).fetchall()
-    conn.close()
-    return [HistoryRecord(id=r["id"], time=r["time"], user_msg=r["user_msg"],
-                          bot_msg=r["bot_msg"], sentiment=r["sentiment"],
-                          emotion=r["emotion"], risk=r["risk"], session_id=r["session_id"] if "session_id" in r.keys() else "default") for r in rows]
+    q_id = _get_query_user_id(current_user["user_id"])
+    rows = list(db.chats.find({"user_id": q_id, "session_id": session_id}).sort("_id", -1).limit(limit))
+    return [HistoryRecord(
+        id=str(r.get("id", r["_id"])), time=r.get("time", ""), user_msg=r.get("user_msg", ""),
+        bot_msg=r.get("bot_msg", ""), sentiment=r.get("sentiment", ""),
+        emotion=r.get("emotion", ""), risk=r.get("risk", ""), session_id=r.get("session_id", "default")
+    ) for r in rows]
 
 
 @app.delete("/history", tags=["History"])
 async def clear_history(current_user: dict = Depends(get_current_user)):
-    conn = _get_conn()
-    conn.execute("DELETE FROM chats WHERE user_id=?", (current_user["user_id"],))
-    conn.commit()
-    conn.close()
+    q_id = _get_query_user_id(current_user["user_id"])
+    db.chats.delete_many({"user_id": q_id})
     return {"message": "Chat history cleared"}
+
+@app.delete("/history/{session_id}", tags=["History"])
+async def delete_session(session_id: str, current_user: dict = Depends(get_current_user)):
+    q_id = _get_query_user_id(current_user["user_id"])
+    db.chats.delete_many({"user_id": q_id, "session_id": session_id})
+    return {"message": "Session deleted"}
 
 
 # ═════════════════════════════════════════════════════
