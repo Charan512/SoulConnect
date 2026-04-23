@@ -24,3 +24,5 @@ __pycache__/
 # IDEs
 .vscode/
 .idea/
+
+generate_dataset.py

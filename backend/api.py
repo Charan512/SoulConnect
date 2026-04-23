@@ -206,7 +206,12 @@ app = FastAPI(
 )
 
 frontend_url = os.environ.get("FRONTEND_URL")
-allowed_origins = [frontend_url] if frontend_url else ["*"]
+if not frontend_url:
+    raise RuntimeError(
+        "FRONTEND_URL environment variable is not set. "
+        "Add it to your .env file (e.g. FRONTEND_URL=https://your-app.vercel.app)"
+    )
+allowed_origins = [frontend_url]
 
 app.add_middleware(
     CORSMiddleware,
