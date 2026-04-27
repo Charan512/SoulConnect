@@ -1,1 +1,31 @@
-frontend/
+# Environment variables
+.env
+.env.local
+
+# MacOS
+.DS_Store
+
+# Python (Backend)
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+*.db
+*.sqlite
+*.sqlite3
+venv/
+ENV/
+.venv/
+
+# Node (Frontend)
+node_modules/
+dist/
+build/
+.npm/
+
+# Models / Large files
+*.pkl
+
+# IDEs
+.vscode/
+.idea/

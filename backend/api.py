@@ -211,11 +211,10 @@ if not frontend_url:
         "FRONTEND_URL environment variable is not set. "
         "Add it to your .env file (e.g. FRONTEND_URL=https://your-app.vercel.app)"
     )
-allowed_origins = [frontend_url]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=[frontend_url],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
