@@ -66,24 +66,72 @@ Set this as the `VITE_API_URL` environment variable inside your Vercel deploymen
 
 ---
 
-## 🛠️ Tech Stack & Architecture
+## 🏛️ System Architecture & Workflow
 
-### Backend
-- **Framework**: FastAPI (Python)
-- **Database**: SQLite (`chat_history.db`)
-- **Libraries**: `torch`, `transformers`, `scikit-learn`, `joblib`, `bcrypt`, `twilio`, `pandas`
+### Architecture Diagram
 
-### AI / NLP Models
-- **Sentiment**: `cardiffnlp/twitter-roberta-base-sentiment-latest`
-- **Emotion**: `SamLowe/roberta-base-go_emotions`
-- **Risk Classifier**: Custom trained TF-IDF Logistic Regression model (`risk_model.pkl` & `vectorizer.pkl`)
-- **LLM**: `TinyLlama/TinyLlama-1.1B-Chat-v1.0` hosted locally for fast generation without API timeouts.
+```mermaid
+graph TD
+    subgraph Frontend [Client Side - React/Vite]
+        UI[User Interface / Chat]
+        Voice[Web Speech API / Audio Recording]
+    end
 
-### Frontend
-- **Framework**: React + Vite
-- **Styling**: Vanilla CSS (`App.css`) with modern UI elements.
-- **State Management**: React Context (`AuthContext.jsx`)
-- **Icons**: `lucide-react`
+    subgraph Backend [Server Side - FastAPI]
+        API[FastAPI Endpoints]
+        Auth[JWT Authentication]
+        
+        subgraph NLP_Engine [NLP Analysis Pipeline]
+            Sent[RoBERTa Sentiment]
+            Emo[RoBERTa Emotion]
+            Risk[Risk Classifier - TF-IDF + LR]
+            Fuzzy[Fuzzy Logic Urgency Engine]
+        end
+        
+        LLM[Qwen 2.5 0.5B Instruct LLM]
+    end
+
+    subgraph External_Services [External APIs]
+        DB[(MongoDB)]
+        Twilio[Twilio Voice API]
+        Bhashini[Bhashini STT API]
+    end
+
+    UI -->|JSON requests| API
+    Voice -->|Audio Base64| API
+    API -->|Validates Token| Auth
+    API -->|Save/Fetch History| DB
+    API -->|Transcribe Audio| Bhashini
+    
+    API -->|Text Input| Sent
+    API -->|Text Input| Emo
+    API -->|Text Input| Risk
+    
+    Sent --> Fuzzy
+    Risk --> Fuzzy
+    Fuzzy -->|Determines Urgency Mode| LLM
+    Emo -->|Determines Therapy Type| LLM
+    
+    Fuzzy -->|If EMERGENCY| Twilio
+    Twilio -.->|Calls Contact| Emergency_Contact((Emergency Contact))
+    
+    LLM -->|Empathetic Response| API
+    API -->|JSON Response| UI
+```
+
+### Detailed Project Explanation
+
+Soul Connect operates through a highly orchestrated pipeline designed to provide immediate, context-aware, and safe mental health support:
+
+1. **User Interaction & Speech Processing**: The user communicates via the React frontend (typing or voice). Voice inputs are transcribed to text securely using the Bhashini Speech-to-Text API.
+2. **Multi-Model NLP Analysis**: Every message hits the FastAPI backend and is simultaneously fed into three distinct models:
+   - A RoBERTa model to classify basic **Sentiment** (Positive/Negative/Neutral).
+   - A RoBERTa model to classify complex **Emotions** (Sadness, Anxiety, Fatigue, etc.).
+   - A custom-trained TF-IDF Logistic Regression model to calculate the exact probability of **Self-Harm/Suicide Risk**.
+3. **Fuzzy Logic Decision Engine**: To prevent false alarms, a `scikit-fuzzy` control system evaluates the risk probability against the sentiment score to output an exact **Urgency Score**. This determines the intervention mode: *Support* (casual), *Therapy* (structured CBT/Stress relief), or *Emergency* (crisis).
+4. **Crisis Intervention (Twilio)**: If the fuzzy logic engine determines a high-risk *Emergency* state, a background task immediately triggers the Twilio API to place an automated voice call to the user's registered emergency contact, alerting them of the user's specific distressing message.
+5. **Contextual LLM Generation**: The system dynamically generates a strict system prompt for the `Qwen/Qwen2.5-0.5B-Instruct` LLM. The prompt fuses the detected emotion, the urgency mode, and specific therapeutic techniques (e.g., CBT framing or grounding exercises) to generate a highly empathetic, safe, and de-escalating response.
+6. **Data Persistence**: All chat sessions and user accounts are securely encrypted and stored in MongoDB Atlas, allowing seamless history retrieval and state management.
 
 ---
 
